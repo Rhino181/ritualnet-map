@@ -455,18 +455,35 @@
           
           if (error) throw error;
           
+          // Remove from map
           markers.eachLayer(m => {
             if (m.options.data?.id === markerId) {
               markers.removeLayer(m);
             }
           });
           
+          // Remove from recent list
           const entry = document.querySelector(`.entry[data-id="${markerId}"]`);
           if (entry) entry.remove();
           
           updateCounter(Math.max(0, totalCount - 1));
           
-          console.log('✅ Deleted:', markerId);
+          // CRITICAL: Update cache to remove deleted item
+          try {
+            const cached = localStorage.getItem('ritualnet_cache');
+            if (cached) {
+              const cachedData = JSON.parse(cached);
+              if (cachedData.data) {
+                cachedData.data = cachedData.data.filter(s => s.id !== markerId);
+                localStorage.setItem('ritualnet_cache', JSON.stringify(cachedData));
+                console.log('💾 Cache updated after delete');
+              }
+            }
+          } catch (e) {
+            console.warn('Cache update failed:', e);
+          }
+          
+          console.log('✅ Deleted permanently:', markerId);
         } catch (e) {
           alert('Failed to delete: ' + e.message);
           console.error('Delete error:', e);
@@ -569,7 +586,7 @@
 
       loadAll();
 
-      console.log('🔗 Setting up realtime...');
+      console.log('🔗 Setting up realtime with DELETE support...');
 
       const channel = supabase.channel('summonings-realtime')
         .on('postgres_changes', { 
@@ -583,6 +600,56 @@
             addMarkerToMap(row);
             addToRecent(row, true);
             updateCounter(totalCount + 1);
+            
+            // Update cache with new entry
+            try {
+              const cached = localStorage.getItem('ritualnet_cache');
+              if (cached) {
+                const cachedData = JSON.parse(cached);
+                if (cachedData.data) {
+                  cachedData.data.unshift(row);
+                  if (cachedData.data.length > 25) cachedData.data.pop();
+                  localStorage.setItem('ritualnet_cache', JSON.stringify(cachedData));
+                }
+              }
+            } catch (e) {
+              console.warn('Cache update failed:', e);
+            }
+          }
+        })
+        .on('postgres_changes', {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'summonings'
+        }, payload => {
+          const deletedId = payload.old.id;
+          console.log('⚡ Delete event received:', deletedId);
+          
+          // Remove from map
+          markers.eachLayer(m => {
+            if (m.options.data?.id === deletedId) {
+              markers.removeLayer(m);
+            }
+          });
+          
+          // Remove from recent list
+          const entry = document.querySelector(`.entry[data-id="${deletedId}"]`);
+          if (entry) entry.remove();
+          
+          updateCounter(Math.max(0, totalCount - 1));
+          
+          // Update cache
+          try {
+            const cached = localStorage.getItem('ritualnet_cache');
+            if (cached) {
+              const cachedData = JSON.parse(cached);
+              if (cachedData.data) {
+                cachedData.data = cachedData.data.filter(s => s.id !== deletedId);
+                localStorage.setItem('ritualnet_cache', JSON.stringify(cachedData));
+              }
+            }
+          } catch (e) {
+            console.warn('Cache update failed:', e);
           }
         })
         .subscribe((status) => {
