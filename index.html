@@ -586,29 +586,98 @@
 
       loadAll();
 
-      console.log('🔗 Setting up realtime with DELETE support...');
+      console.log('🔗 Setting up realtime subscriptions...');
 
-      const channel = supabase.channel('summonings-realtime')
-        .on('postgres_changes', { 
-          event: 'INSERT', 
-          schema: 'public', 
-          table: 'summonings' 
-        }, payload => {
-          const row = payload.new;
-          if (!document.querySelector(`.entry[data-id="${row.id}"]`)) {
-            console.log('⚡ New summoning received:', row.id);
-            addMarkerToMap(row);
-            addToRecent(row, true);
-            updateCounter(totalCount + 1);
+      // Create a unique channel for this session
+      const channelName = 'summonings-changes-' + Math.random().toString(36).substr(2, 9);
+      
+      const channel = supabase
+        .channel(channelName, {
+          config: {
+            broadcast: { self: false },
+            presence: { key: '' }
+          }
+        })
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'summonings'
+          },
+          (payload) => {
+            console.log('⚡ INSERT event received:', payload);
+            const row = payload.new;
             
-            // Update cache with new entry
+            // Check if this marker already exists
+            let alreadyExists = false;
+            markers.eachLayer(m => {
+              if (m.options.data?.id === row.id) {
+                alreadyExists = true;
+              }
+            });
+            
+            if (!alreadyExists) {
+              console.log('✅ Adding new marker from realtime:', row.id);
+              addMarkerToMap(row);
+              addToRecent(row, true);
+              updateCounter(totalCount + 1);
+              
+              // Update cache with new entry
+              try {
+                const cached = localStorage.getItem('ritualnet_cache');
+                if (cached) {
+                  const cachedData = JSON.parse(cached);
+                  if (cachedData.data) {
+                    cachedData.data.unshift(row);
+                    if (cachedData.data.length > 25) cachedData.data.pop();
+                    cachedData.timestamp = Date.now(); // Refresh cache timestamp
+                    localStorage.setItem('ritualnet_cache', JSON.stringify(cachedData));
+                  }
+                }
+              } catch (e) {
+                console.warn('Cache update failed:', e);
+              }
+            } else {
+              console.log('ℹ️ Marker already exists, skipping:', row.id);
+            }
+          }
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: 'DELETE',
+            schema: 'public',
+            table: 'summonings'
+          },
+          (payload) => {
+            console.log('⚡ DELETE event received:', payload);
+            const deletedId = payload.old.id;
+            
+            // Remove from map
+            markers.eachLayer(m => {
+              if (m.options.data?.id === deletedId) {
+                markers.removeLayer(m);
+                console.log('✅ Removed marker from map:', deletedId);
+              }
+            });
+            
+            // Remove from recent list
+            const entry = document.querySelector(`.entry[data-id="${deletedId}"]`);
+            if (entry) {
+              entry.remove();
+              console.log('✅ Removed from recent list:', deletedId);
+            }
+            
+            updateCounter(Math.max(0, totalCount - 1));
+            
+            // Update cache
             try {
               const cached = localStorage.getItem('ritualnet_cache');
               if (cached) {
                 const cachedData = JSON.parse(cached);
                 if (cachedData.data) {
-                  cachedData.data.unshift(row);
-                  if (cachedData.data.length > 25) cachedData.data.pop();
+                  cachedData.data = cachedData.data.filter(s => s.id !== deletedId);
                   localStorage.setItem('ritualnet_cache', JSON.stringify(cachedData));
                 }
               }
@@ -616,44 +685,21 @@
               console.warn('Cache update failed:', e);
             }
           }
-        })
-        .on('postgres_changes', {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'summonings'
-        }, payload => {
-          const deletedId = payload.old.id;
-          console.log('⚡ Delete event received:', deletedId);
-          
-          // Remove from map
-          markers.eachLayer(m => {
-            if (m.options.data?.id === deletedId) {
-              markers.removeLayer(m);
-            }
-          });
-          
-          // Remove from recent list
-          const entry = document.querySelector(`.entry[data-id="${deletedId}"]`);
-          if (entry) entry.remove();
-          
-          updateCounter(Math.max(0, totalCount - 1));
-          
-          // Update cache
-          try {
-            const cached = localStorage.getItem('ritualnet_cache');
-            if (cached) {
-              const cachedData = JSON.parse(cached);
-              if (cachedData.data) {
-                cachedData.data = cachedData.data.filter(s => s.id !== deletedId);
-                localStorage.setItem('ritualnet_cache', JSON.stringify(cachedData));
-              }
-            }
-          } catch (e) {
-            console.warn('Cache update failed:', e);
+        )
+        .subscribe((status, err) => {
+          console.log('📡 Realtime subscription status:', status);
+          if (err) {
+            console.error('❌ Realtime subscription error:', err);
           }
-        })
-        .subscribe((status) => {
-          console.log('📡 Realtime status:', status);
+          if (status === 'SUBSCRIBED') {
+            console.log('✅ Successfully subscribed to realtime updates!');
+          }
+          if (status === 'CHANNEL_ERROR') {
+            console.error('❌ Channel error - realtime not working');
+          }
+          if (status === 'TIMED_OUT') {
+            console.error('❌ Subscription timed out');
+          }
         });
 
       map.on('click', e => {
