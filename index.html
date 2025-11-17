@@ -302,13 +302,6 @@
     .delete-marker-btn:hover {
       background: #cc0000; transform: scale(1.05); box-shadow: 0 0 30px rgba(255,0,0,0.8);
     }
-
-    .map-click-pulse {
-      position: absolute; width: 60px; height: 60px; background: rgba(0,255,65,0.4);
-      border-radius: 50%; pointer-events: none; z-index: 999;
-      animation: clickPulse 0.6s ease-out forwards;
-    }
-    @keyframes clickPulse {0% {transform: scale(0); opacity: 1;}100% {transform: scale(3); opacity: 0;}}
   </style>
 </head>
 <body>
@@ -399,6 +392,8 @@
         countDisplay.textContent = count;
       }
 
+      console.log('🚀 RITUALNET - Optimized IO v2.0');
+
       function getSize() {
         const z = map.getZoom();
         if (z <= 3) return 30;
@@ -449,22 +444,32 @@
 
       window.deleteMarker = async function(markerId) {
         if (!adminMode) return;
+        
         if (!confirm('Delete this summoning permanently?')) return;
         
         try {
-          const { error } = await supabase.from('summonings').delete().eq('id', markerId);
+          const { error } = await supabase
+            .from('summonings')
+            .delete()
+            .eq('id', markerId);
+          
           if (error) throw error;
           
           markers.eachLayer(m => {
-            if (m.options.data?.id === markerId) markers.removeLayer(m);
+            if (m.options.data?.id === markerId) {
+              markers.removeLayer(m);
+            }
           });
           
           const entry = document.querySelector(`.entry[data-id="${markerId}"]`);
           if (entry) entry.remove();
           
           updateCounter(Math.max(0, totalCount - 1));
+          
+          console.log('✅ Deleted:', markerId);
         } catch (e) {
           alert('Failed to delete: ' + e.message);
+          console.error('Delete error:', e);
         }
       };
 
@@ -487,23 +492,25 @@
       }
 
       async function loadAll() {
+        const CACHE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+        const CACHE_FRESH_AGE = 60 * 60 * 1000;
+        
         try {
           const cached = localStorage.getItem('ritualnet_cache');
           if (cached) {
             const cachedData = JSON.parse(cached);
             const cacheAge = Date.now() - (cachedData.timestamp || 0);
-            const CACHE_VALID_MS = 7 * 24 * 60 * 60 * 1000;
             
-            if (cacheAge < CACHE_VALID_MS && cachedData.data && Array.isArray(cachedData.data)) {
-              console.log('📦 Using cache:', cachedData.data.length, 'markers');
+            if (cacheAge < CACHE_MAX_AGE && cachedData.data && Array.isArray(cachedData.data)) {
+              console.log('📦 Cache:', cachedData.data.length, 'markers, age:', Math.round(cacheAge/60000), 'min');
               cachedData.data.forEach(s => {
                 addMarkerToMap(s);
                 addToRecent(s, false);
               });
               updateCounter(cachedData.data.length);
               
-              if (cacheAge < 60 * 60 * 1000) {
-                console.log('✅ Cache fresh, skipping DB query');
+              if (cacheAge < CACHE_FRESH_AGE) {
+                console.log('✅ Fresh cache (<1hr) - Skipped DB query - 100% IO saved!');
                 return;
               }
             }
@@ -513,6 +520,7 @@
         }
 
         try {
+          console.log('🔄 Fetching fresh data (limit: 25, was 100)...');
           const { data, error } = await supabase
             .from('summonings')
             .select('*')
@@ -522,7 +530,7 @@
           if (error) throw error;
           
           if (data && data.length > 0) {
-            console.log('🔄 Fresh data:', data.length, 'markers');
+            console.log('✅ Loaded:', data.length, 'markers (75% less data)');
             
             updateCounter(data.length);
             
@@ -531,7 +539,10 @@
                 data: data,
                 timestamp: Date.now() 
               }));
-            } catch (e) {}
+              console.log('💾 Cache updated');
+            } catch (e) {
+              console.warn('Cache save failed:', e);
+            }
             
             const existingIds = new Set();
             markers.eachLayer(m => {
@@ -542,5 +553,178 @@
                                data.length !== existingIds.size;
             
             if (hasChanges) {
+              console.log('🔄 Data changed, refreshing UI');
               markers.clearLayers();
               recent.innerHTML = '';
+              data.forEach(s => {
+                addMarkerToMap(s);
+                addToRecent(s, false);
+              });
+            }
+          }
+        } catch (e) {
+          console.warn('Load error:', e);
+        }
+      }
+
+      loadAll();
+
+      console.log('🔗 Setting up realtime...');
+
+      const channel = supabase.channel('summonings-realtime')
+        .on('postgres_changes', { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'summonings' 
+        }, payload => {
+          const row = payload.new;
+          if (!document.querySelector(`.entry[data-id="${row.id}"]`)) {
+            console.log('⚡ New summoning received:', row.id);
+            addMarkerToMap(row);
+            addToRecent(row, true);
+            updateCounter(totalCount + 1);
+          }
+        })
+        .subscribe((status) => {
+          console.log('📡 Realtime status:', status);
+        });
+
+      map.on('click', e => {
+        clickedPos = e.latlng;
+        const modal = document.getElementById('ritualModal');
+        modal.style.display = 'flex';
+        setTimeout(() => modal.classList.add('show'), 10);
+        document.getElementById('avatarPreview').src = 'ritualnet-logo.png';
+        document.getElementById('username').value = '';
+        document.getElementById('pledge').value = '';
+      });
+
+      document.getElementById('titleLink').onclick = () => window.open('https://x.com/ritualnet', '_blank');
+
+      const closeModal = () => {
+        const modal = document.getElementById('ritualModal');
+        modal.classList.remove('show');
+        setTimeout(() => modal.style.display = 'none', 200);
+      };
+
+      document.getElementById('closeBtn').onclick = closeModal;
+      document.querySelector('.modal').onclick = e => {
+        if (e.target.classList.contains('modal')) closeModal();
+      };
+
+      document.querySelector('.upload-btn').onclick = () => document.getElementById('avatarInput').click();
+      document.getElementById('avatarInput').onchange = e => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = ev => document.getElementById('avatarPreview').src = ev.target.result;
+          reader.readAsDataURL(file);
+        }
+      };
+
+      document.querySelector('.join-btn').onclick = () => {
+        const avatar = document.getElementById('avatarPreview').src;
+        const name = document.getElementById('username').value.trim() || "ritualist";
+        const pledge = document.getElementById('pledge').value.trim() || "I have joined.";
+        if (!clickedPos) return;
+
+        const tempId = 'temp-' + Date.now();
+        const newSummon = { 
+          id: tempId,
+          name, 
+          pledge, 
+          avatar, 
+          lat: clickedPos.lat, 
+          lng: clickedPos.lng, 
+          timestamp: Date.now() 
+        };
+
+        const marker = addMarkerToMap(newSummon);
+        addToRecent(newSummon, true);
+        updateCounter(totalCount + 1);
+
+        closeModal();
+        
+        const success = document.getElementById('success');
+        success.classList.add('active');
+        
+        map.flyTo(clickedPos, 10, { duration: 0.6 });
+
+        setTimeout(() => success.classList.remove('active'), 1000);
+
+        supabase.from('summonings')
+          .insert({
+            name, 
+            pledge, 
+            avatar, 
+            lat: clickedPos.lat, 
+            lng: clickedPos.lng, 
+            timestamp: newSummon.timestamp
+          })
+          .select()
+          .then(({ data, error }) => {
+            if (error) {
+              console.warn('Save error:', error);
+            } else if (data && data[0]) {
+              marker.options.data.id = data[0].id;
+              const tempEntry = document.querySelector(`.entry[data-id="${tempId}"]`);
+              if (tempEntry) {
+                tempEntry.dataset.id = data[0].id;
+              }
+              console.log('✅ Saved to database:', data[0].id);
+            }
+          })
+          .catch(err => {
+            console.error('Database save failed:', err);
+          });
+      };
+
+      document.getElementById('ritualLogo').onclick = () => {
+        logoClicks++;
+        if (adminClickTimer) clearTimeout(adminClickTimer);
+        
+        if (logoClicks === 7) {
+          adminMode = !adminMode;
+          document.body.classList.toggle('admin-mode', adminMode);
+          
+          const logo = document.getElementById('ritualLogo');
+          if (adminMode) {
+            logo.style.filter = 'drop-shadow(0 0 40px #ff0000)';
+            alert('🔴 ADMIN MODE ACTIVATED\n\nClick any marker to see DELETE option.');
+          } else {
+            logo.style.filter = '';
+            alert('✅ Admin mode deactivated');
+          }
+          
+          markers.eachLayer(m => {
+            if (m.options.data) {
+              updateMarkerPopup(m);
+            }
+          });
+          
+          logoClicks = 0;
+        } else if (logoClicks === 14) {
+          document.getElementById('resetConfirm').style.display = 'flex';
+          logoClicks = 0;
+        } else {
+          adminClickTimer = setTimeout(() => { logoClicks = 0; }, 3000);
+        }
+      };
+
+      document.getElementById('confirmReset').onclick = async () => {
+        await supabase.from('summonings').delete().neq('timestamp', 0);
+        markers.clearLayers();
+        recent.innerHTML = '';
+        updateCounter(0);
+        localStorage.removeItem('ritualnet_cache');
+        document.getElementById('resetConfirm').style.display = 'none';
+        console.log('🔥 Database reset complete');
+      };
+
+      document.getElementById('cancelReset').onclick = () => {
+        document.getElementById('resetConfirm').style.display = 'none';
+      };
+    });
+  </script>
+</body>
+</html>
